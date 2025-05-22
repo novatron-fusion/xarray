@@ -5,6 +5,7 @@ import io
 import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
+import concurrent.futures
 
 import numpy as np
 
@@ -509,6 +510,7 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
         decode_vlen_strings=True,
         driver=None,
         driver_kwds=None,
+        in_parallel=False,
         **kwargs,
     ) -> DataTree:
         groups_dict = self.open_groups_as_dict(
@@ -528,6 +530,7 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
             decode_vlen_strings=decode_vlen_strings,
             driver=driver,
             driver_kwds=driver_kwds,
+            in_parallel=in_parallel,
             **kwargs,
         )
 
@@ -552,11 +555,39 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
         decode_vlen_strings=True,
         driver=None,
         driver_kwds=None,
+        in_parallel=False,
         **kwargs,
     ) -> dict[str, Dataset]:
         from xarray.backends.common import _iter_nc_groups
         from xarray.core.treenode import NodePath
         from xarray.core.utils import close_on_error
+
+        def _open_dataset_from_group(
+            store,
+            path_group,
+            mask_and_scale=mask_and_scale,
+            decode_times=decode_times,
+            concat_characters=concat_characters,
+            decode_coords=decode_coords,
+            drop_variables=drop_variables,
+            use_cftime=use_cftime,
+            decode_timedelta=decode_timedelta,
+            **kwargs,
+        ):
+            group_store = H5NetCDFStore(store._manager, group=path_group, **kwargs)
+            store_entrypoint = StoreBackendEntrypoint()
+            with close_on_error(group_store):
+                group_ds = store_entrypoint.open_dataset(
+                    group_store,
+                    mask_and_scale=mask_and_scale,
+                    decode_times=decode_times,
+                    concat_characters=concat_characters,
+                    decode_coords=decode_coords,
+                    drop_variables=drop_variables,
+                    use_cftime=use_cftime,
+                    decode_timedelta=decode_timedelta,
+                )
+            return group_ds
 
         # Keep this message for some versions
         # remove and set phony_dims="access" above
@@ -581,28 +612,40 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
         else:
             parent = NodePath("/")
 
-        manager = store._manager
-        groups_dict = {}
-        for path_group in _iter_nc_groups(store.ds, parent=parent):
-            group_store = H5NetCDFStore(manager, group=path_group, **kwargs)
-            store_entrypoint = StoreBackendEntrypoint()
-            with close_on_error(group_store):
-                group_ds = store_entrypoint.open_dataset(
-                    group_store,
-                    mask_and_scale=mask_and_scale,
-                    decode_times=decode_times,
-                    concat_characters=concat_characters,
-                    decode_coords=decode_coords,
-                    drop_variables=drop_variables,
-                    use_cftime=use_cftime,
-                    decode_timedelta=decode_timedelta,
-                )
+        if not in_parallel:
+            manager = store._manager
+            groups_dict = {}
+            for path_group in _iter_nc_groups(store.ds, parent=parent):
+                group_ds = _open_dataset_from_group(store, path_group, **kwargs)
 
-            if group:
-                group_name = str(NodePath(path_group).relative_to(parent))
+                if group:
+                    group_name = str(NodePath(path_group).relative_to(parent))
+                else:
+                    group_name = str(NodePath(path_group))
+                groups_dict[group_name] = group_ds
             else:
-                group_name = str(NodePath(path_group))
-            groups_dict[group_name] = group_ds
+                thread_count = 30
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=thread_count
+                ) as executor:
+                    futures_to_path_group = {
+                        executor.submit(
+                            _open_dataset_from_group, store, path_group, **kwargs
+                        ): path_group
+                        for path_group in _iter_nc_groups(store.ds, parent=parent)
+                    }
+                    group_dict = {}
+                    for future in concurrent.futures.as_completed(
+                        futures_to_path_group
+                    ):
+                        path_group = futures_to_path_group[future]
+                        group_ds = future.result()
+
+                        if group:
+                            group_name = str(NodePath(path_group).relative_to(parent))
+                        else:
+                            group_name = str(NodePath(path_group))
+                        groups_dict[group_name] = group_ds
 
         # only warn if phony_dims exist in file
         # remove together with the above check
