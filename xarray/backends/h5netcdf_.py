@@ -612,9 +612,8 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
         else:
             parent = NodePath("/")
 
+        groups_dict = {}
         if not in_parallel:
-            manager = store._manager
-            groups_dict = {}
             for path_group in _iter_nc_groups(store.ds, parent=parent):
                 group_ds = _open_dataset_from_group(store, path_group, **kwargs)
 
@@ -623,29 +622,33 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
                 else:
                     group_name = str(NodePath(path_group))
                 groups_dict[group_name] = group_ds
-            else:
-                thread_count = 30
-                with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=thread_count
-                ) as executor:
-                    futures_to_path_group = {
-                        executor.submit(
-                            _open_dataset_from_group, store, path_group, **kwargs
-                        ): path_group
-                        for path_group in _iter_nc_groups(store.ds, parent=parent)
-                    }
-                    group_dict = {}
-                    for future in concurrent.futures.as_completed(
-                        futures_to_path_group
-                    ):
-                        path_group = futures_to_path_group[future]
+        else:
+            print("Run in Parallel")
+            thread_count = 30
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=thread_count
+            ) as executor:
+                futures_to_path_group = {
+                    executor.submit(
+                        _open_dataset_from_group, store, path_group, **kwargs
+                    ): path_group
+                    for path_group in _iter_nc_groups(store.ds, parent=parent)
+                }
+                for future in concurrent.futures.as_completed(
+                    futures_to_path_group
+                ):
+                    path_group = futures_to_path_group[future]
+                    try:
                         group_ds = future.result()
+                    except Exception as exc:
+                        print("Thread executing _open_dataset_from_group raised error: %s" % exc)
+                        raise
 
-                        if group:
-                            group_name = str(NodePath(path_group).relative_to(parent))
-                        else:
-                            group_name = str(NodePath(path_group))
-                        groups_dict[group_name] = group_ds
+                    if group:
+                        group_name = str(NodePath(path_group).relative_to(parent))
+                    else:
+                        group_name = str(NodePath(path_group))
+                    groups_dict[group_name] = group_ds
 
         # only warn if phony_dims exist in file
         # remove together with the above check
