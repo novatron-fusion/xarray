@@ -588,6 +588,42 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
                     decode_timedelta=decode_timedelta,
                 )
             return group_ds
+        
+        def _find_branches(executor: concurrent.futures.Executor, root, parent="/"):
+            from xarray.core.treenode import NodePath
+            parent = NodePath(parent)
+            futures = {}
+            for path, group in root.groups.items():
+                gpath = parent / path
+                future = executor.submit(_find_branches, executor, group, gpath)
+                futures[future] = str(gpath)
+            return futures
+        
+        def _build_tree_paths(root,parent):
+            max_iterations = 100
+            thread_count = 30
+
+            tree = []
+            iterations = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=thread_count) as executor:
+                root_future = executor.submit(_find_branches, executor, root, parent)
+                futures={root_future: parent}
+                while futures and iterations<max_iterations:
+                    iterations += 1
+                    if iterations>=max_iterations:
+                        print(f"Max number of iterations ({max_iterations}) reached")
+                    new_futures = {}
+                    for future in concurrent.futures.as_completed(futures):
+                        branch_path = futures[future]
+                        tree.append(branch_path)
+                        try:
+                            new_future = future.result()
+                        except Exception as exc:
+                            print(f"Thread executing find_branches with parent: {str(parent)} raised error: {str(exc)}")
+                            raise
+                        new_futures.update(new_future)
+                    futures = new_futures
+            return tree
 
         # Keep this message for some versions
         # remove and set phony_dims="access" above
@@ -614,7 +650,8 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
 
         groups_dict = {}
         if not in_parallel:
-            for path_group in _iter_nc_groups(store.ds, parent=parent):
+            root_ds = store.ds
+            for path_group in _iter_nc_groups(root=root_ds, parent=parent):
                 group_ds = _open_dataset_from_group(store, path_group, **kwargs)
 
                 if group:
@@ -624,6 +661,8 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
                 groups_dict[group_name] = group_ds
         else:
             print("Run in Parallel")
+            root_ds = store.ds
+            path_tree = _build_tree_paths(root=root_ds, parent=parent)
             thread_count = 30
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=thread_count
@@ -632,7 +671,7 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
                     executor.submit(
                         _open_dataset_from_group, store, path_group, **kwargs
                     ): path_group
-                    for path_group in _iter_nc_groups(store.ds, parent=parent)
+                    for path_group in path_tree
                 }
                 for future in concurrent.futures.as_completed(
                     futures_to_path_group
