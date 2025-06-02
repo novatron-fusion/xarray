@@ -599,7 +599,8 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
                 futures[future] = str(gpath)
             return futures
         
-        def _build_tree_paths(root,parent):
+        def _build_tree_paths(root, parent):
+            parent = str(parent)
             max_iterations = 100
             thread_count = 30
 
@@ -614,7 +615,7 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
                         print(f"Max number of iterations ({max_iterations}) reached")
                     new_futures = {}
                     for future in concurrent.futures.as_completed(futures):
-                        branch_path = futures[future]
+                        branch_path = str(futures[future])
                         tree.append(branch_path)
                         try:
                             new_future = future.result()
@@ -662,7 +663,7 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
         else:
             print("Run in Parallel")
             root_ds = store.ds
-            path_tree = _build_tree_paths(root=root_ds, parent=parent)
+            tree_paths = _build_tree_paths(root=root_ds, parent=parent)
             thread_count = 30
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=thread_count
@@ -671,7 +672,7 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
                     executor.submit(
                         _open_dataset_from_group, store, path_group, **kwargs
                     ): path_group
-                    for path_group in path_tree
+                    for path_group in tree_paths
                 }
                 for future in concurrent.futures.as_completed(
                     futures_to_path_group
