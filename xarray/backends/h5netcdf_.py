@@ -613,20 +613,10 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
             parent = NodePath("/")
 
         groups_dict = {}
-        if not in_parallel:
-            root_ds = store.ds
-            for path_group in _iter_nc_groups(root=root_ds, parent=parent):
-                group_ds = _open_dataset_from_group(store, path_group, **kwargs)
-
-                if group:
-                    group_name = str(NodePath(path_group).relative_to(parent))
-                else:
-                    group_name = str(NodePath(path_group))
-                groups_dict[group_name] = group_ds
-        else:
-            print("Run in Parallel")
-            root_ds = store.ds
+        root_ds = store.ds
+        if in_parallel:
             tree_paths = _build_tree_paths(root=root_ds, parent=parent)
+
             thread_count = 30
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=thread_count
@@ -637,6 +627,7 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
                     ): path_group
                     for path_group in tree_paths
                 }
+
                 for future in concurrent.futures.as_completed(
                     futures_to_path_group
                 ):
@@ -652,6 +643,16 @@ class H5netcdfBackendEntrypoint(BackendEntrypoint):
                     else:
                         group_name = str(NodePath(path_group))
                     groups_dict[group_name] = group_ds
+        else:
+            for path_group in _iter_nc_groups(root=root_ds, parent=parent):
+                group_ds = _open_dataset_from_group(store, path_group, **kwargs)
+
+                if group:
+                    group_name = str(NodePath(path_group).relative_to(parent))
+                else:
+                    group_name = str(NodePath(path_group))
+                groups_dict[group_name] = group_ds
+            
 
         # only warn if phony_dims exist in file
         # remove together with the above check
